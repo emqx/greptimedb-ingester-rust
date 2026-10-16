@@ -18,6 +18,7 @@ pub mod api;
 pub mod bulk;
 pub mod channel_manager;
 pub mod client;
+mod consts;
 pub mod database;
 mod error;
 pub mod flight;
@@ -25,7 +26,7 @@ pub mod helpers;
 pub mod load_balance;
 pub mod table;
 
-pub use self::channel_manager::{ChannelConfig, ChannelManager, ClientTlsOption, TlsVerify};
+pub use self::channel_manager::{ChannelConfig, ChannelManager, ClientTlsOption, GrpcCompression, TlsVerify};
 pub use self::error::{Error, Result};
 
 // Re-export bulk module components for easier access

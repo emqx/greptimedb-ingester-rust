@@ -15,7 +15,10 @@
 // Integration tests for GreptimeDB Rust Ingester
 // These tests require a running GreptimeDB instance
 
+use arrow::util::display::array_value_to_string;
 use arrow_array::Array;
+use arrow_flight::{decode::FlightRecordBatchStream, Ticket};
+use futures::TryStreamExt;
 use futures_util::StreamExt;
 use greptimedb_ingester::api::v1::*;
 use greptimedb_ingester::client::Client;
@@ -25,6 +28,8 @@ use greptimedb_ingester::{
     database::Database, BulkInserter, BulkWriteOptions, ColumnDataType, Result, Rows as BulkRows,
     TableSchema,
 };
+use prost::Message;
+use std::option::Option;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 // Test configuration
@@ -51,6 +56,157 @@ fn unique_table_name(prefix: &str) -> String {
         .unwrap()
         .as_millis();
     format!("{prefix}_{timestamp}")
+}
+
+#[tokio::test]
+async fn test_json2_insert() -> std::result::Result<(), Box<dyn std::error::Error>> {
+    let config = TestConfig::new();
+    let client = Client::with_urls([&config.endpoint]);
+    let database = Database::new_with_dbname(&config.database, client.clone());
+    let table_name = unique_table_name("json2");
+    let schema = vec![
+        timestamp("ts", ColumnDataType::TimestampMillisecond),
+        json2_field("payload"),
+    ];
+    let payloads = [
+        "null",
+        r#"{"nested":{"items":[1,"two",null,{"ok":false}]},"value":42}"#,
+        r#"{"nested":{"other":true},"value":"changed"}"#,
+        "{}",
+        r#"{"value":null}"#,
+    ];
+
+    // The first request intentionally contains only NULL, to verify that auto-creation uses
+    // the JSON2 schema marker. Subsequent requests exercise different JSON shapes.
+    for (index, payload) in payloads.iter().enumerate() {
+        let request = RowInsertRequests {
+            inserts: vec![RowInsertRequest {
+                table_name: table_name.clone(),
+                rows: Some(Rows {
+                    schema: schema.clone(),
+                    rows: vec![Row {
+                        values: vec![
+                            timestamp_millisecond_value(index as i64),
+                            json2_value(payload)?,
+                        ],
+                    }],
+                }),
+            }],
+        };
+        let affected = if index == 0 {
+            database
+                .insert_with_hints(request, &[("append_mode", "true")])
+                .await?
+        } else {
+            database.insert(request).await?
+        };
+        assert_eq!(affected, 1);
+    }
+
+    // Query through Flight and compare values independently of Arrow string layout.
+    async fn query_rows(
+        client: &Client,
+        dbname: &str,
+        sql: String,
+    ) -> std::result::Result<Vec<Vec<Option<String>>>, Box<dyn std::error::Error>> {
+        let request = GreptimeRequest {
+            header: Some(RequestHeader {
+                dbname: dbname.into(),
+                ..Default::default()
+            }),
+            request: Some(greptime_request::Request::Query(QueryRequest {
+                query: Some(query_request::Query::Sql(sql)),
+            })),
+        };
+        let mut flight = client.make_flight_client()?;
+        let response = flight
+            .mut_inner()
+            .do_get(Ticket {
+                ticket: request.encode_to_vec().into(),
+            })
+            .await?;
+        let mut batches = FlightRecordBatchStream::new_from_flight_data(
+            response.into_inner().map_err(Into::into),
+        );
+        let mut rows = Vec::new();
+        while let Some(batch) = batches.try_next().await? {
+            for index in 0..batch.num_rows() {
+                let mut row = Vec::new();
+                for values in batch.columns() {
+                    row.push(if values.is_null(index) {
+                        None
+                    } else {
+                        Some(array_value_to_string(values.as_ref(), index)?)
+                    });
+                }
+                rows.push(row);
+            }
+        }
+        Ok(rows)
+    }
+
+    // Whole-object round trip preserves empty objects and nested JSON nulls.
+    let rows = query_rows(
+        &client,
+        &config.database,
+        format!("SELECT json_get(payload, '') FROM {table_name} ORDER BY ts"),
+    )
+    .await?;
+    let actual = rows
+        .into_iter()
+        .map(|row| {
+            row.into_iter()
+                .next()
+                .flatten()
+                .map(|value| serde_json::from_str::<serde_json::Value>(&value))
+                .transpose()
+        })
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let mut expected = vec![None];
+    for payload in &payloads[1..] {
+        expected.push(Some(serde_json::from_str::<serde_json::Value>(payload)?));
+    }
+    assert_eq!(actual, expected);
+
+    use serde_json::json;
+    for (query, expected) in [
+        // A path can contain different scalar types in different rows.
+        ("SELECT payload.value FROM {table} ORDER BY ts",
+            json!([[null], ["42"], ["changed"], [null], [null]])),
+        // Dot notation, array indexing and explicitly typed extraction.
+        ("SELECT payload.nested.items[0]::BIGINT, payload.nested.items[1], \
+            json_get(payload, 'nested.items[3].ok')::BOOLEAN, payload.nested.other::BOOLEAN \
+            FROM {table} ORDER BY ts",
+            json!([[null,null,null,null], ["1","two","false",null],
+                [null,null,null,"true"], [null,null,null,null], [null,null,null,null]])),
+        // Missing paths, out-of-range indices and JSON nulls yield SQL NULL.
+        ("SELECT payload.missing, payload.nested.items[99], payload.nested.items[2] \
+            FROM {table} ORDER BY ts",
+            json!([[null,null,null], [null,null,null], [null,null,null],
+                [null,null,null], [null,null,null]])),
+        // Filter on a nested boolean and a string-valued path.
+        ("SELECT payload.value FROM {table} \
+            WHERE payload.nested.other::BOOLEAN = true AND payload.value = 'changed'",
+            json!([["changed"]])),
+        // Numeric expression and predicate on an array element.
+        ("SELECT payload.nested.items[0]::BIGINT + 10 FROM {table} \
+            WHERE payload.nested.items[0]::BIGINT > 0",
+            json!([["11"]])),
+        // Count scalar values separately from null/missing values; aggregate numbers.
+        ("SELECT COUNT(*), COUNT(payload.value), SUM(payload.nested.items[0]::BIGINT) FROM {table}",
+            json!([["5","2","1"]])),
+        // SQL NULL is distinct from an empty object or an object containing JSON null.
+        ("SELECT COUNT(*) FROM {table} WHERE payload IS NULL", json!([["1"]])),
+        ("SELECT payload.nested.other::BOOLEAN, COUNT(*) FROM {table} \
+            GROUP BY payload.nested.other::BOOLEAN ORDER BY 1 NULLS FIRST",
+            json!([[null,"4"], ["true","1"]])),
+    ] {
+        let sql = query.replace("{table}", &table_name);
+        let actual = query_rows(&client, &config.database, sql.clone()).await?;
+        assert_eq!(serde_json::to_value(actual)?, expected, "query: {sql}");
+    }
+
+    Ok(())
 }
 
 #[tokio::test]
@@ -266,8 +422,8 @@ async fn test_bulk_stream_writer_parallel() -> Result<()> {
 
     for batch_num in 0..batch_count {
         let rows = create_test_batch_bulk(&bulk_writer, batch_num, batch_size)?;
-        let request_id = bulk_writer.write_rows_async(rows).await?;
-        request_ids.push(request_id);
+        let ids = bulk_writer.write_rows_async(rows).await?;
+        request_ids.extend(ids);
     }
 
     // Wait for all requests to complete
@@ -400,14 +556,14 @@ fn create_test_batch_bulk(
         .unwrap()
         .as_millis() as i64;
 
-    let mut rows = bulk_writer.alloc_rows_buffer(batch_size, 1024)?;
+    let mut rows = bulk_writer.alloc_rows_buffer(batch_size)?;
 
     for i in 0..batch_size {
         let global_idx = batch_id * batch_size + i;
         let sensor_id = format!("sensor_{:06}", global_idx % 100);
         let temperature = 20.0 + (global_idx as f64 * 0.1) % 30.0;
         let timestamp = current_time + (global_idx as i64 * 10);
-        let status = if global_idx.is_multiple_of(10) { 0 } else { 1 };
+        let status = if global_idx % 10 == 0 { 0 } else { 1 };
 
         let row = Row::new().add_values(vec![
             Value::TimestampMillisecond(timestamp),

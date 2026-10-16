@@ -5,10 +5,19 @@ on:
   push:
     tags:
       - "v*.*.*"
+  workflow_dispatch:
 
 jobs:
   release:
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
-      - run: cargo publish --token ${{ secrets.CRATES_TOKEN }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Run library tests
+        run: cargo test --lib
+      - name: Validate publish package
+        run: cargo publish --dry-run
+      - name: Publish to crates.io
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: cargo publish --token ${{ secrets.CRATES_TOKEN }}

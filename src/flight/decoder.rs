@@ -30,7 +30,7 @@ pub struct FlightDecoder {
 
 impl FlightDecoder {
     pub fn new(stream: Streaming<FlightData>) -> Self {
-        let stream = stream.map_err(FlightError::Tonic);
+        let stream = stream.map_err(|status| FlightError::Tonic(Box::new(status)));
         let flight_data_decoder = FlightDataDecoder::new(stream);
         Self {
             stream: FlightRecordBatchStream::new(flight_data_decoder),

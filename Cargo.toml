@@ -1,16 +1,31 @@
 [package]
 name = "greptimedb-ingester"
-version = "0.15.0"
+version = "0.19.0"
 edition = "2021"
+rust-version = "1.85"
 license = "Apache-2.0"
 description = "A rust client for GreptimeDB gRPC protocol"
+homepage = "https://github.com/GreptimeTeam/greptimedb-ingester-rust"
+repository = "https://github.com/GreptimeTeam/greptimedb-ingester-rust"
+documentation = "https://docs.rs/greptimedb-ingester"
+keywords = ["greptimedb", "database", "grpc", "arrow", "ingest"]
+categories = ["database", "api-bindings"]
+exclude = [
+    ".github/**",
+    ".gitignore",
+    "docker-compose.test.yml",
+    "examples/db-connection.toml",
+    "licenserc.toml",
+    "rust-toolchain.toml",
+    "scripts/**",
+]
 
 [dependencies]
-arrow = { version = "54.2", features = ["prettyprint"] }
-arrow-array = { version = "54.2", default-features = false, features = ["chrono-tz"] }
-arrow-flight = "54.2"
-arrow-ipc = { version = "54.2", default-features = false, features = ["lz4", "zstd"] }
-arrow-schema = { version = "54.2", features = ["serde"] }
+arrow = { version = "58.1", features = ["prettyprint"] }
+arrow-array = { version = "58.1", default-features = false, features = ["chrono-tz"] }
+arrow-flight = "58.1"
+arrow-ipc = { version = "58.1", default-features = false, features = ["lz4", "zstd"] }
+arrow-schema = { version = "58.1", features = ["serde"] }
 async-stream = "0.3"
 async-trait = "0.1"
 base64 = "0.22"
@@ -19,13 +34,13 @@ enum_dispatch = "0.3"
 flatbuffers = "24"
 futures = "0.3"
 futures-util  = "0.3"
-greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "454c52634c3bac27de10bf0d85d5533eed1cf03f" }
+greptime-proto = "0.1.0"
 hyper = "1.1"
 hyper-rustls = { version = "0.27", default-features = false, features = ["http2", "native-tokio", "tls12", "aws-lc-rs"] }
 hyper-util = { version = "0.1", features = ["client-legacy", "http2"] }
 lazy_static = "1.4"
 parking_lot = "0.12"
-prost = { version = "0.13", features = ["no-recursion-limit"] }
+prost = { version = "0.14", features = ["no-recursion-limit"] }
 rand = "0.9"
 rustls = "0.23"
 rustls-native-certs = "0.8"
@@ -36,13 +51,10 @@ snafu = "0.8"
 tokio = { version = "1.40", features = ["full"] }
 tokio-stream = { version = "0.1", features = ["net"] }
 tokio-util = { version = "0.7", features = ["io-util", "compat"] }
-tonic = { version = "0.12", features = ["tls", "tls-native-roots", "gzip", "zstd"] }
+tonic = { version = "0.14", features = ["tls-aws-lc", "tls-native-roots", "gzip", "zstd"] }
 tower = "0.5"
 derive_builder = "0.20"
 toml = "0.9.8"
-
-[build-dependencies]
-tonic-build = "0.11"
 
 [dev-dependencies]
 tokio = { version = "1.40", features = ["full"] }
@@ -54,6 +66,12 @@ num_cpus = "1.16"
 [[test]]
 name = "integration"
 path = "tests/integration/integration_test.rs"
+harness = true
+required-features = ["integration-tests"]
+
+[[test]]
+name = "compression_integration"
+path = "tests/integration/compression_integration.rs"
 harness = true
 required-features = ["integration-tests"]
 

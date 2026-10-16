@@ -20,6 +20,13 @@ use tonic::{metadata::errors::InvalidMetadataValue, Status};
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum Error {
+    #[snafu(display("Invalid JSON2 value: {reason}"))]
+    InvalidJson2 {
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Invalid client tls config, {}", msg))]
     InvalidTlsConfig {
         msg: String,
@@ -186,6 +193,31 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Missing timestamp column in schema. Time windowing requires a column with SemanticType::Timestamp"))]
+    MissingTimestampColumn {
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Multiple timestamp columns in schema. Exactly one column with SemanticType::Timestamp is allowed"))]
+    MultipleTimestampColumns {
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Timestamp value is null. Timestamp columns cannot contain null values"))]
+    NullTimestamp {
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Invalid timestamp data type: {}. Expected Timestamp with Second, Millisecond, Microsecond, or Nanosecond unit", data_type))]
+    InvalidTimestampType {
+        data_type: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Unexpected flight message: {err_msg}"))]
     UnexpectedFlightMessage {
         err_msg: String,
@@ -231,6 +263,7 @@ impl Error {
             Self::InvalidTlsConfig { .. }
                 | Self::MissingField { .. }
                 | Self::InvalidConfigFilePath { .. }
+                | Self::InvalidJson2 { .. }
         )
     }
 }

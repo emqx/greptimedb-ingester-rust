@@ -44,14 +44,14 @@ fn create_test_rows_optimized(
         .as_millis() as i64;
 
     // Use the writer's optimized buffer allocation - this shares the Arc<Schema>
-    let mut rows = writer.alloc_rows_buffer(rows_per_batch, 1024)?;
+    let mut rows = writer.alloc_rows_buffer(rows_per_batch)?;
 
     for i in 0..rows_per_batch {
         let global_idx = batch_id * rows_per_batch + i;
         let timestamp = current_time + (global_idx as i64 * 50);
         let device_id = format!("sensor_{:06}", global_idx % 1000);
         let temperature = 18.0 + (global_idx as f64 * 0.03) % 25.0;
-        let status = if global_idx.is_multiple_of(100) { 0 } else { 1 };
+        let status = if global_idx % 100 == 0 { 0 } else { 1 };
 
         // Traditional approach: build row by index (fast but error-prone)
         let row = Row::new().add_values(vec![
@@ -78,14 +78,14 @@ fn create_test_rows_safe(
         .unwrap()
         .as_millis() as i64;
 
-    let mut rows = writer.alloc_rows_buffer(rows_per_batch, 1024)?;
+    let mut rows = writer.alloc_rows_buffer(rows_per_batch)?;
 
     for i in 0..rows_per_batch {
         let global_idx = batch_id * rows_per_batch + i;
         let timestamp = current_time + (global_idx as i64 * 50);
         let device_id = format!("safe_sensor_{:06}", global_idx % 1000);
         let temperature = 18.0 + (global_idx as f64 * 0.03) % 25.0;
-        let status = if global_idx.is_multiple_of(100) { 0 } else { 1 };
+        let status = if global_idx % 100 == 0 { 0 } else { 1 };
 
         // Schema-safe approach: build row by field name (safest)
         let row = writer
@@ -114,16 +114,16 @@ fn create_test_rows(
         .unwrap()
         .as_millis() as i64;
 
-    let mut rows = Rows::new(column_schemas, rows_per_batch, 1024)?;
+    let mut rows = Rows::new(column_schemas, rows_per_batch)?;
     for i in 0..rows_per_batch {
         let global_idx = batch_id * rows_per_batch + i;
         let timestamp = current_time + (global_idx as i64 * 50); // 50ms intervals
         let device_id = format!("sensor_{:06}", global_idx % 1000); // 1000 unique sensors
         let temperature = 18.0 + (global_idx as f64 * 0.03) % 25.0; // 18-43°C range
-        let status = if global_idx.is_multiple_of(100) { 0 } else { 1 }; // 1% error rate
+        let status = if global_idx % 100 == 0 { 0 } else { 1 }; // 1% error rate
 
         // Row values must match table_template column order exactly:
-        // Index 0: ts (timestamp), Index 1: sensor_id, Index 2: temperature, Index 3: sensor_status
+        // Index 0: ts (timestamp), Index 1: sensor_id (tag), Index 2: temperature, Index 3: sensor_status
         let row = Row::new().add_values(vec![
             Value::TimestampMillisecond(timestamp), // Index 0: ts
             Value::String(device_id),               // Index 1: sensor_id
@@ -158,7 +158,7 @@ async fn run_sequential_writes() -> Result<Duration> {
         .build()
         .unwrap()
         .add_timestamp("ts", ColumnDataType::TimestampMillisecond) // Index 0
-        .add_field("sensor_id", ColumnDataType::String) // Index 1
+        .add_tag("sensor_id", ColumnDataType::String) // Index 1
         .add_field("temperature", ColumnDataType::Float64) // Index 2
         .add_field("sensor_status", ColumnDataType::Int64); // Index 3
 
@@ -244,7 +244,7 @@ async fn run_parallel_writes() -> Result<Duration> {
         .build()
         .unwrap()
         .add_timestamp("ts", ColumnDataType::TimestampMillisecond) // Index 0
-        .add_field("sensor_id", ColumnDataType::String) // Index 1
+        .add_tag("sensor_id", ColumnDataType::String) // Index 1
         .add_field("temperature", ColumnDataType::Float64) // Index 2
         .add_field("sensor_status", ColumnDataType::Int64); // Index 3
 
@@ -284,8 +284,8 @@ async fn run_parallel_writes() -> Result<Duration> {
             _ => create_test_rows(batch_num, rows_per_batch, bulk_writer.column_schemas())?,
         };
         match bulk_writer.write_rows_async(rows).await {
-            Ok(request_id) => {
-                request_ids.push(request_id);
+            Ok(ids) => {
+                request_ids.extend(ids);
                 if (batch_num + 1) % 25 == 0 {
                     println!("  Submitted: {}/{} batches", batch_num + 1, batch_count);
                 }

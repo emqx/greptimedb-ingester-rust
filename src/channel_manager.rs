@@ -27,12 +27,13 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime};
 use rustls::{DigitallySignedStruct, SignatureScheme};
 use snafu::{OptionExt, ResultExt};
 use tokio_util::sync::CancellationToken;
-use tonic::transport::{
-    Certificate, Channel as InnerChannel, ClientTlsConfig, Endpoint, Identity, Uri,
-};
+use tonic::codec::CompressionEncoding;
+use tonic::transport::{Certificate, ClientTlsConfig, Identity};
+use tonic::transport::{Channel as InnerChannel, Endpoint, Uri};
 use tower::Service;
 
-use crate::error::{CreateChannelSnafu, InvalidConfigFilePathSnafu, InvalidTlsConfigSnafu, Result};
+use crate::error::{CreateChannelSnafu, Result};
+use crate::error::{InvalidConfigFilePathSnafu, InvalidTlsConfigSnafu};
 
 const RECYCLE_CHANNEL_INTERVAL_SECS: u64 = 60;
 pub const DEFAULT_GRPC_REQUEST_TIMEOUT_SECS: u64 = 10;
@@ -104,7 +105,6 @@ impl ChannelManager {
             inner: Arc::new(inner),
         }
     }
-
     pub fn with_tls_config(config: ChannelConfig) -> Result<Self> {
         ensure_default_crypto_provider();
         let mut inner = Inner::with_config(config.clone());
@@ -290,7 +290,6 @@ impl ChannelManager {
         } else {
             "http"
         };
-
         let mut endpoint =
             Endpoint::new(format!("{http_prefix}://{addr}")).context(CreateChannelSnafu)?;
         if force_http_scheme {
@@ -413,6 +412,24 @@ pub enum TlsVerify {
     VerifyNone,
 }
 
+/// gRPC compression algorithms supported by [`ChannelConfig`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GrpcCompression {
+    /// Gzip compression.
+    Gzip,
+    /// Zstandard compression.
+    Zstd,
+}
+
+impl From<GrpcCompression> for CompressionEncoding {
+    fn from(value: GrpcCompression) -> Self {
+        match value {
+            GrpcCompression::Gzip => CompressionEncoding::Gzip,
+            GrpcCompression::Zstd => CompressionEncoding::Zstd,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ChannelConfig {
     pub timeout: Option<Duration>,
@@ -433,12 +450,33 @@ pub struct ChannelConfig {
     pub max_recv_message_size: u64,
     // Max gRPC sending(encoding) message size
     pub max_send_message_size: u64,
+    /// Preferred explicit gRPC compression encoding for requests.
+    pub send_compression_encoding: Option<GrpcCompression>,
+    /// Preferred explicit gRPC compression encoding for responses.
+    pub accept_compression_encoding: Option<GrpcCompression>,
+    /// Legacy compatibility flag that enables Zstd request compression.
+    /// `send_compression_encoding` takes precedence when both are set.
+    #[deprecated(
+        note = "use with_send_compression(GrpcCompression) to choose the encoding explicitly"
+    )]
     pub send_compression: bool,
+    /// Legacy compatibility flag that enables Zstd response compression.
+    /// `accept_compression_encoding` takes precedence when both are set.
+    #[deprecated(
+        note = "use with_accept_compression(GrpcCompression) to choose the encoding explicitly"
+    )]
     pub accept_compression: bool,
 }
 
 impl Default for ChannelConfig {
     fn default() -> Self {
+        Self::default_with_legacy_grpc_compression()
+    }
+}
+
+impl ChannelConfig {
+    #[allow(deprecated)]
+    fn default_with_legacy_grpc_compression() -> Self {
         Self {
             timeout: Some(Duration::from_secs(DEFAULT_GRPC_REQUEST_TIMEOUT_SECS)),
             connect_timeout: Some(Duration::from_secs(DEFAULT_GRPC_CONNECT_TIMEOUT_SECS)),
@@ -456,13 +494,13 @@ impl Default for ChannelConfig {
             client_tls: None,
             max_recv_message_size: DEFAULT_MAX_GRPC_RECV_MESSAGE_SIZE,
             max_send_message_size: DEFAULT_MAX_GRPC_SEND_MESSAGE_SIZE,
+            send_compression_encoding: None,
+            accept_compression_encoding: None,
             send_compression: false,
             accept_compression: false,
         }
     }
-}
 
-impl ChannelConfig {
     pub fn new() -> Self {
         Default::default()
     }
@@ -562,6 +600,30 @@ impl ChannelConfig {
     pub fn client_tls_config(mut self, client_tls_option: ClientTlsOption) -> Self {
         self.client_tls = Some(client_tls_option);
         self
+    }
+
+    /// Set the gRPC compression encoding used when sending requests.
+    pub fn with_send_compression(mut self, compression: GrpcCompression) -> Self {
+        self.send_compression_encoding = Some(compression);
+        self
+    }
+
+    /// Set the gRPC compression encoding accepted from responses.
+    pub fn with_accept_compression(mut self, compression: GrpcCompression) -> Self {
+        self.accept_compression_encoding = Some(compression);
+        self
+    }
+
+    #[allow(deprecated)]
+    pub(crate) fn resolved_send_compression(&self) -> Option<GrpcCompression> {
+        self.send_compression_encoding
+            .or_else(|| self.send_compression.then_some(GrpcCompression::Zstd))
+    }
+
+    #[allow(deprecated)]
+    pub(crate) fn resolved_accept_compression(&self) -> Option<GrpcCompression> {
+        self.accept_compression_encoding
+            .or_else(|| self.accept_compression.then_some(GrpcCompression::Zstd))
     }
 }
 
@@ -948,6 +1010,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)]
     fn test_config() {
         let default_cfg = ChannelConfig::new();
         assert_eq!(
@@ -968,6 +1031,8 @@ mod tests {
                 client_tls: None,
                 max_recv_message_size: DEFAULT_MAX_GRPC_RECV_MESSAGE_SIZE,
                 max_send_message_size: DEFAULT_MAX_GRPC_SEND_MESSAGE_SIZE,
+                send_compression_encoding: None,
+                accept_compression_encoding: None,
                 send_compression: false,
                 accept_compression: false,
             },
@@ -992,6 +1057,7 @@ mod tests {
                 server_ca_cert_path: "some_server_path".to_string(),
                 client_cert_path: "some_cert_path".to_string(),
                 client_key_path: "some_key_path".to_string(),
+                cipher_suites: vec![],
             });
 
         assert_eq!(
@@ -1013,13 +1079,58 @@ mod tests {
                     server_ca_cert_path: "some_server_path".to_string(),
                     client_cert_path: "some_cert_path".to_string(),
                     client_key_path: "some_key_path".to_string(),
+                cipher_suites: vec![],
                 }),
                 max_recv_message_size: DEFAULT_MAX_GRPC_RECV_MESSAGE_SIZE,
                 max_send_message_size: DEFAULT_MAX_GRPC_SEND_MESSAGE_SIZE,
+                send_compression_encoding: None,
+                accept_compression_encoding: None,
                 send_compression: false,
                 accept_compression: false,
             },
             cfg
+        );
+    }
+
+    #[test]
+    fn test_grpc_compression_config() {
+        let config = ChannelConfig::new()
+            .with_send_compression(GrpcCompression::Gzip)
+            .with_accept_compression(GrpcCompression::Zstd);
+
+        assert_eq!(
+            Some(GrpcCompression::Gzip),
+            config.send_compression_encoding
+        );
+        assert_eq!(
+            Some(GrpcCompression::Zstd),
+            config.accept_compression_encoding
+        );
+        #[allow(deprecated)]
+        {
+            assert!(!config.send_compression);
+            assert!(!config.accept_compression);
+        }
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn test_explicit_grpc_compression_resolves_before_legacy_flags() {
+        let config = ChannelConfig {
+            send_compression_encoding: Some(GrpcCompression::Gzip),
+            accept_compression_encoding: Some(GrpcCompression::Zstd),
+            send_compression: true,
+            accept_compression: false,
+            ..ChannelConfig::default()
+        };
+
+        assert_eq!(
+            Some(GrpcCompression::Gzip),
+            config.resolved_send_compression()
+        );
+        assert_eq!(
+            Some(GrpcCompression::Zstd),
+            config.resolved_accept_compression()
         );
     }
 
@@ -1129,6 +1240,7 @@ mod tests {
             server_ca_cert_path: String::new(),
             client_cert_path: String::new(),
             client_key_path: String::new(),
+                cipher_suites: vec![],
         });
 
         let manager = ChannelManager::with_tls_config(config);
@@ -1143,6 +1255,7 @@ mod tests {
                 server_ca_cert_path: "/tmp/nonexistent-ca.pem".to_string(),
                 client_cert_path: String::new(),
                 client_key_path: String::new(),
+                cipher_suites: vec![],
             });
 
         let manager = ChannelManager::with_tls_config(config);
@@ -1157,6 +1270,7 @@ mod tests {
                 server_ca_cert_path: String::new(),
                 client_cert_path: String::new(),
                 client_key_path: String::new(),
+                cipher_suites: vec![],
             });
 
         let mgr = ChannelManager::with_tls_config(config).unwrap();
@@ -1174,6 +1288,7 @@ mod tests {
             server_ca_cert_path: String::new(),
             client_cert_path: "/tmp/client.crt".to_string(),
             client_key_path: String::new(),
+                cipher_suites: vec![],
         });
 
         let manager = ChannelManager::with_tls_config(config);

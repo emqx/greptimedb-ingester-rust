@@ -36,11 +36,11 @@ use crate::client::Client;
 use crate::error::{self, IllegalDatabaseResponseSnafu};
 use crate::flight::decoder::FlightDecoder;
 use crate::flight::do_put::DoPutResponse;
-use crate::Result;
+use crate::{consts, Result};
 
 type FlightDataStream = Pin<Box<dyn Stream<Item = FlightData> + Send>>;
 
-type DoPutResponseStream = Pin<Box<dyn Stream<Item = Result<DoPutResponse>>>>;
+type DoPutResponseStream = Pin<Box<dyn Stream<Item = Result<DoPutResponse>> + Send>>;
 
 pub type QueryResultStream = Pin<Box<dyn Stream<Item = Result<arrow_array::RecordBatch>> + Send>>;
 
@@ -145,6 +145,32 @@ impl Database {
     /// Ingest a stream of [RecordBatch]es that belong to a table, using Arrow Flight's "`DoPut`"
     /// method. The return value is also a stream, produces [DoPutResponse]s.
     pub async fn do_put(&self, stream: FlightDataStream) -> Result<DoPutResponseStream> {
+        self.do_put_with_hints(stream, &[]).await
+    }
+
+    /// Ingest a stream of [RecordBatch]es with request hints using Arrow Flight's "`DoPut`".
+    pub(crate) async fn do_put_with_hints(
+        &self,
+        stream: FlightDataStream,
+        hints: &[(&str, &str)],
+    ) -> Result<DoPutResponseStream> {
+        let request = self.do_put_request(stream, hints)?;
+
+        let mut client = self.client.make_flight_client()?;
+        let response = client.mut_inner().do_put(request).await?;
+        let response = response
+            .into_inner()
+            .map_err(Into::into)
+            .and_then(|x| future::ready(DoPutResponse::try_from(x)))
+            .boxed();
+        Ok(response)
+    }
+
+    fn do_put_request(
+        &self,
+        stream: FlightDataStream,
+        hints: &[(&str, &str)],
+    ) -> Result<tonic::Request<FlightDataStream>> {
         let mut request = tonic::Request::new(stream);
 
         if let Some(AuthHeader {
@@ -155,22 +181,17 @@ impl Database {
             let auth_str = format!("Basic {encoded}");
             let value = MetadataValue::from_str(&auth_str)
                 .context(error::InvalidTonicMetadataValueSnafu)?;
-            request.metadata_mut().insert("x-greptime-auth", value);
+            request
+                .metadata_mut()
+                .insert(consts::REQUEST_METADATA_KEY_AUTH, value);
         }
 
         request.metadata_mut().insert(
-            "x-greptime-db-name",
+            consts::REQUEST_METADATA_KEY_DATABASE_NAME,
             MetadataValue::from_str(&self.dbname).context(error::InvalidTonicMetadataValueSnafu)?,
         );
-
-        let mut client = self.client.make_flight_client()?;
-        let response = client.mut_inner().do_put(request).await?;
-        let response = response
-            .into_inner()
-            .map_err(Into::into)
-            .and_then(|x| future::ready(DoPutResponse::try_from(x)))
-            .boxed();
-        Ok(response)
+        Self::put_hints(request.metadata_mut(), hints)?;
+        Ok(request)
     }
 
     async fn handle_query(&self, request: Request) -> Result<QueryResultStream> {
@@ -229,10 +250,56 @@ impl Database {
         let hint_strings: Vec<String> = hints.iter().map(|(k, v)| format!("{k}={v}")).collect();
         let value = hint_strings.join(",");
 
-        let key = AsciiMetadataKey::from_static("x-greptime-hints");
+        let key = AsciiMetadataKey::from_static(consts::REQUEST_METADATA_KEY_HINTS);
         let value =
             AsciiMetadataValue::from_str(&value).context(error::InvalidTonicMetadataValueSnafu)?;
         metadata.insert(key, value);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::stream;
+
+    #[test]
+    fn test_do_put_request_contains_auth_database_and_hints() {
+        let mut database = Database::new_with_dbname("metrics", Client::new());
+        database.set_auth(AuthScheme::Basic(Basic {
+            username: "user".to_string(),
+            password: "pass".to_string(),
+        }));
+        let stream = stream::empty().boxed();
+
+        let request = database
+            .do_put_request(stream, &[("auto_create_table", "false")])
+            .unwrap();
+        let metadata = request.metadata();
+
+        assert_eq!(
+            metadata
+                .get(consts::REQUEST_METADATA_KEY_HINTS)
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "auto_create_table=false"
+        );
+        assert_eq!(
+            metadata
+                .get(consts::REQUEST_METADATA_KEY_DATABASE_NAME)
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "metrics"
+        );
+        assert_eq!(
+            metadata
+                .get(consts::REQUEST_METADATA_KEY_AUTH)
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "Basic dXNlcjpwYXNz"
+        );
     }
 }
