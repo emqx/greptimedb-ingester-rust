@@ -158,7 +158,7 @@ impl BulkWriteOptions {
 /// Each writer is bound to a specific table with fixed schema
 pub struct BulkStreamWriter {
     sender: mpsc::Sender<FlightData>,
-    response_stream: Pin<Box<dyn Stream<Item = Result<DoPutResponse>>>>,
+    response_stream: Pin<Box<dyn Stream<Item = Result<DoPutResponse>> + Send>>,
     table_schema: TableSchema,
     // Cache the Arrow schema to avoid recreating it for each batch
     arrow_schema: Arc<Schema>,

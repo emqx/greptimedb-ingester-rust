@@ -197,6 +197,68 @@ async fn test_bulk_stream_writer_sequential() -> Result<()> {
     Ok(())
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_bulk_stream_writer_send() -> Result<()> {
+    let config = TestConfig::new();
+    let client = Client::with_urls([&config.endpoint]);
+    let database = Database::new_with_dbname(&config.database, client.clone());
+    let table_name = unique_table_name("bulk_send");
+    let mut response = database
+        .query(&format!(
+            "CREATE TABLE {table_name} (ts TIMESTAMP TIME INDEX, reading BIGINT)"
+        ))
+        .await?;
+    while let Some(batch) = response.next().await {
+        batch?;
+    }
+
+    // Both the constructor future and its returned writer must be Send.
+    let writer_table = table_name.clone();
+    let writer = tokio::spawn(async move {
+        let schema = TableSchema::builder()
+            .name(&writer_table)
+            .build()
+            .unwrap()
+            .add_timestamp("ts", ColumnDataType::TimestampMillisecond)
+            .add_field("reading", ColumnDataType::Int64);
+        BulkInserter::new(client, &config.database)
+            .create_bulk_stream_writer(&schema, None)
+            .await
+    })
+    .await
+    .expect("writer creation task panicked")?;
+
+    tokio::spawn(async move {
+        let mut writer = writer;
+        for i in 0..3 {
+            let mut rows = writer.alloc_rows_buffer(1, 128)?;
+            rows.add_row(greptimedb_ingester::Row::new().add_values(vec![
+                greptimedb_ingester::Value::TimestampMillisecond(i),
+                greptimedb_ingester::Value::Int64(i),
+            ]))?;
+            assert_eq!(writer.write_rows(rows).await?.affected_rows(), 1);
+        }
+        writer.finish().await
+    })
+    .await
+    .expect("writer execution task panicked")?;
+    let mut response = database
+        .query(&format!("SELECT reading FROM {table_name} ORDER BY ts"))
+        .await?;
+    let mut stored = Vec::new();
+    while let Some(batch) = response.next().await {
+        let batch = batch?;
+        let readings = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<arrow_array::Int64Array>()
+            .expect("reading column must be Int64");
+        stored.extend(readings.values().iter().copied());
+    }
+    assert_eq!(stored, vec![0, 1, 2]);
+    Ok(())
+}
+
 #[tokio::test]
 async fn test_bulk_stream_writer_parallel() -> Result<()> {
     let config = TestConfig::new();

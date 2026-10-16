@@ -40,7 +40,25 @@ use crate::Result;
 
 type FlightDataStream = Pin<Box<dyn Stream<Item = FlightData> + Send>>;
 
-type DoPutResponseStream = Pin<Box<dyn Stream<Item = Result<DoPutResponse>>>>;
+// A concrete input stream lets Rust 1.88 prove that the RPC future is Send.
+struct FlightDataInput(FlightDataStream);
+
+impl Stream for FlightDataInput {
+    type Item = FlightData;
+
+    fn poll_next(
+        self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        self.get_mut().0.as_mut().poll_next(cx)
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.0.size_hint()
+    }
+}
+
+type DoPutResponseStream = Pin<Box<dyn Stream<Item = Result<DoPutResponse>> + Send>>;
 
 pub type QueryResultStream = Pin<Box<dyn Stream<Item = Result<arrow_array::RecordBatch>> + Send>>;
 
@@ -145,7 +163,7 @@ impl Database {
     /// Ingest a stream of [RecordBatch]es that belong to a table, using Arrow Flight's "`DoPut`"
     /// method. The return value is also a stream, produces [DoPutResponse]s.
     pub async fn do_put(&self, stream: FlightDataStream) -> Result<DoPutResponseStream> {
-        let mut request = tonic::Request::new(stream);
+        let mut request = tonic::Request::new(FlightDataInput(stream));
 
         if let Some(AuthHeader {
             auth_scheme: Some(AuthScheme::Basic(Basic { username, password })),
