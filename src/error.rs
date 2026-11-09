@@ -216,9 +216,12 @@ impl From<Status> for Error {
 }
 impl From<arrow_flight::error::FlightError> for Error {
     fn from(e: arrow_flight::error::FlightError) -> Self {
-        Self::UnexpectedFlightMessage {
-            err_msg: e.to_string(),
-            location: Location::default(),
+        match e {
+            arrow_flight::error::FlightError::Tonic(status) => Self::from(status),
+            other => Self::UnexpectedFlightMessage {
+                err_msg: other.to_string(),
+                location: Location::default(),
+            },
         }
     }
 }
