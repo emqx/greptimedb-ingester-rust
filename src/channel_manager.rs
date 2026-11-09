@@ -678,7 +678,7 @@ fn make_custom_crypto_provider_with_ciphers(
 
     if allowed_suites.is_empty() {
         return InvalidTlsConfigSnafu {
-            msg: format!("no valid cipher suite found in {:?}", allowed_cipher_names),
+            msg: format!("no valid cipher suite found in {allowed_cipher_names:?}"),
         }
         .fail();
     }
@@ -693,8 +693,7 @@ fn make_custom_crypto_provider_with_ciphers(
     if filtered.is_empty() {
         return InvalidTlsConfigSnafu {
             msg: format!(
-                "none of the requested cipher suites are available: {:?}",
-                allowed_cipher_names
+                "none of the requested cipher suites are available: {allowed_cipher_names:?}"
             ),
         }
         .fail();
@@ -992,6 +991,7 @@ mod tests {
                 server_ca_cert_path: "some_server_path".to_string(),
                 client_cert_path: "some_cert_path".to_string(),
                 client_key_path: "some_key_path".to_string(),
+                cipher_suites: Vec::new(),
             });
 
         assert_eq!(
@@ -1013,6 +1013,7 @@ mod tests {
                     server_ca_cert_path: "some_server_path".to_string(),
                     client_cert_path: "some_cert_path".to_string(),
                     client_key_path: "some_key_path".to_string(),
+                    cipher_suites: Vec::new(),
                 }),
                 max_recv_message_size: DEFAULT_MAX_GRPC_RECV_MESSAGE_SIZE,
                 max_send_message_size: DEFAULT_MAX_GRPC_SEND_MESSAGE_SIZE,
@@ -1129,6 +1130,7 @@ mod tests {
             server_ca_cert_path: String::new(),
             client_cert_path: String::new(),
             client_key_path: String::new(),
+            cipher_suites: Vec::new(),
         });
 
         let manager = ChannelManager::with_tls_config(config);
@@ -1143,6 +1145,7 @@ mod tests {
                 server_ca_cert_path: "/tmp/nonexistent-ca.pem".to_string(),
                 client_cert_path: String::new(),
                 client_key_path: String::new(),
+                cipher_suites: Vec::new(),
             });
 
         let manager = ChannelManager::with_tls_config(config);
@@ -1157,6 +1160,7 @@ mod tests {
                 server_ca_cert_path: String::new(),
                 client_cert_path: String::new(),
                 client_key_path: String::new(),
+                cipher_suites: Vec::new(),
             });
 
         let mgr = ChannelManager::with_tls_config(config).unwrap();
@@ -1174,6 +1178,7 @@ mod tests {
             server_ca_cert_path: String::new(),
             client_cert_path: "/tmp/client.crt".to_string(),
             client_key_path: String::new(),
+            cipher_suites: Vec::new(),
         });
 
         let manager = ChannelManager::with_tls_config(config);
